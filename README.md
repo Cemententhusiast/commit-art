@@ -1,7 +1,8 @@
 # commit-art
 
-Draw ASCII art on your GitHub contribution calendar using dated Git commits.
-Requires Python 3.8+ and Git 2.28+.
+Draw text art on your GitHub contribution calendar using dated Git commits.
+Requires Python 3.8+ and Git 2.28+. Automatic ink shading also requires
+Pillow 10.1+ (`python3 -m pip install "Pillow>=10.1"`).
 
 ## Preview and generate
 
@@ -42,7 +43,19 @@ preview marks those cells with `-` and available blank cells with `.`.
 | `1`, `:` | 1 |
 | `2`, `+` | 4 |
 | `3`, `*` | 8 |
-| `4`, `#`, any other printable ASCII character | 16 |
+| `4`, `#` | 16 |
+
+If a UTF-8 file includes characters outside this palette, the CLI estimates
+how much ink each glyph uses in a font and ranks the distinct densities across
+the drawing. Lighter glyphs get fewer commits, darker glyphs get more, and
+equal densities share a shade. The Unicode fills `░▒▓█` have increasing
+densities. Whitespace and the empty Braille cell are blank. In ink mode a dot
+is a light glyph, so use spaces for the background.
+
+Use `--shading ink` to measure glyphs even when the file uses only built-in
+characters. Each character occupies one calendar cell. Ink estimates can vary
+with the installed fonts, and glyphs that the available fonts can't render
+are treated as filled cells.
 
 Change the four counts with `--counts 1,5,12,30`. The preview shows your intended
 shades and total commit count. GitHub assigns shades relative to other days in

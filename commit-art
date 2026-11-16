@@ -3,11 +3,13 @@
 
 import argparse
 from datetime import date, datetime, time, timedelta
+from functools import lru_cache
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import unicodedata
 
 
 DAY = timedelta(days=1)
@@ -37,15 +39,89 @@ def parse_counts(value):
 
 def read_art(source):
     if source == "-":
-        art = sys.stdin.read().replace("\r\n", "\n")
+        art = sys.stdin.buffer.read().decode("utf-8-sig").replace("\r\n", "\n")
     else:
-        art = Path(source).read_text(encoding="ascii")
-    if any(char != "\n" and not " " <= char <= "~" for char in art):
-        raise ValueError("art may contain only printable ASCII and line breaks")
-    return art.splitlines()
+        art = Path(source).read_text(encoding="utf-8-sig")
+    art = unicodedata.normalize("NFC", art)
+    if any(
+        not char.isprintable() and char not in "\n\t" and unicodedata.category(char) != "Zs"
+        for char in art
+    ):
+        raise ValueError("art may contain only printable characters, tabs and line breaks")
+    return [row.expandtabs() for row in art.splitlines()]
 
 
-def plan_art(rows, start, end, counts):
+def art_shades(rows, force_ink):
+    characters = set("".join(rows))
+    blanks = {char: 0 for char in characters if char.isspace() or char == "\u2800"}
+    characters.difference_update(blanks)
+    if not force_ink and characters <= SHADES.keys():
+        return {**SHADES, **blanks, " ": 0}
+    if not characters:
+        return {**blanks, " ": 0}
+
+    try:
+        from PIL import ImageFont
+    except ImportError as error:
+        raise ValueError('ink shading requires Pillow 10.1+ (python3 -m pip install "Pillow>=10.1")') from error
+
+    fontconfig = shutil.which("fc-match")
+
+    @lru_cache(maxsize=None)
+    def system_font(charset=""):
+        if not fontconfig:
+            return None
+        result = subprocess.run(
+            [fontconfig, "-f", "%{file}", f"monospace{charset}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return load_font(result.stdout) if result.stdout else None
+
+    @lru_cache(maxsize=None)
+    def load_font(path):
+        try:
+            return ImageFont.truetype(path, 32)
+        except OSError:
+            return None
+
+    font = system_font() or ImageFont.load_default(size=32)
+
+    @lru_cache(maxsize=None)
+    def missing_glyph(candidate):
+        mask = candidate.getmask("\U0010ffff", mode="L")
+        return mask.size, bytes(mask)
+
+    def glyph_ink(candidate, char):
+        if candidate is not None:
+            mask = candidate.getmask(char, mode="L")
+            pixels = bytes(mask)
+            if (mask.size, pixels) != missing_glyph(candidate):
+                return round(sum(pixels) / 255)
+        return None
+
+    def ink(char):
+        # Keep the standard Unicode fill characters ordered across fonts.
+        blocks = {"░": 128, "▒": 256, "▓": 384, "█": 512}
+        if char in blocks:
+            return blocks[char]
+        coverage = glyph_ink(font, char)
+        if coverage is None:
+            coverage = glyph_ink(system_font(f":charset={ord(char):x}"), char)
+        # Keep unsupported visible glyphs in the drawing.
+        return coverage if coverage is not None else 512
+
+    coverage = {char: ink(char) for char in characters}
+    levels = sorted(set(coverage.values()) - {0})
+    # Rank distinct ink amounts so a sparse drawing still uses the available contrast.
+    shades = {0: 0}
+    for rank, amount in enumerate(levels):
+        shades[amount] = 1 + round(3 * rank / (len(levels) - 1)) if len(levels) > 1 else 4
+    return {**blanks, " ": 0, **{char: shades[amount] for char, amount in coverage.items()}}
+
+
+def plan_art(rows, start, end, counts, force_ink=False):
     # Day offsets keep partial weeks aligned with the calendar's Sunday row.
     start_row = (start.weekday() + 1) % 7
     last_offset = (end - start).days
@@ -54,13 +130,20 @@ def plan_art(rows, start, end, counts):
     if len(rows) > 7 or any(len(row) > width for row in rows):
         raise ValueError(f"art must fit the selected {width}-column × 7-row calendar")
 
+    shades = art_shades(rows, force_ink)
+    pixels = {
+        (row, column): shades[char]
+        for row, line in enumerate(rows)
+        for column, char in enumerate(line)
+        if shades[char]
+    }
+
     preview = []
     plan = []
     for row in range(7):
-        art_row = rows[row] if row < len(rows) else ""
         cells = []
-        for column, char in enumerate(art_row.ljust(width)):
-            shade = 0 if char == " " else SHADES.get(char, 4)
+        for column in range(width):
+            shade = pixels.get((row, column), 0)
             offset = column * 7 + row - start_row
             if not 0 <= offset <= last_offset:
                 if shade:
@@ -207,6 +290,8 @@ def main():
     mode.add_argument("--undo", type=Path, metavar="REPO", help="remove the art from its generated repository")
     parser.add_argument("--push", action="store_true", help="also undo the art on origin")
     parser.add_argument("--counts", type=parse_counts, default="1,4,8,16", metavar="A,B,C,D")
+    parser.add_argument("--shading", choices=("auto", "ink"), default="auto",
+                        help="preserve the built-in palette when possible, or always measure glyphs")
     parser.add_argument("--name", help="Git author name (defaults to git user.name)")
     parser.add_argument("--email", help="Git author email (defaults to git user.email)")
     args = parser.parse_args()
@@ -234,7 +319,10 @@ def main():
         if start < EPOCH:
             raise ValueError("Git commit dates must be on or after 1970-01-01")
 
-        preview, plan = plan_art(read_art(source), start, end, args.counts)
+        preview, plan = plan_art(
+            read_art(source), start, end, args.counts,
+            force_ink=args.shading == "ink",
+        )
         total = sum(count for _, count in plan)
         if args.preview:
             print(f"{start} to {end} · {len(plan)} painted days · {total} commits")
