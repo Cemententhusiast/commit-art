@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Turn ASCII art into dated Git commits."""
+
+import argparse
+from datetime import date, timedelta
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+
+DAY = timedelta(days=1)
+EPOCH = date(1970, 1, 1)
+SHADES = dict(zip("01234.:+*#", (0, 1, 2, 3, 4, 0, 1, 2, 3, 4)))
+
+
+def parse_date(value):
+    parsed = date.fromisoformat(value)
+    if parsed.isoformat() != value:
+        raise ValueError("use YYYY-MM-DD for dates")
+    return parsed
+
+
+def parse_counts(value):
+    try:
+        counts = tuple(int(part) for part in value.split(","))
+    except ValueError:
+        counts = ()
+    if len(counts) != 4 or not 0 < counts[0] < counts[1] < counts[2] < counts[3]:
+        raise argparse.ArgumentTypeError("provide four increasing positive counts")
+    return (0, *counts)
+
+
+def read_art(source):
+    if source == "-":
+        art = sys.stdin.read().replace("\r\n", "\n")
+    else:
+        art = Path(source).read_text(encoding="ascii")
+    if any(char != "\n" and not " " <= char <= "~" for char in art):
+        raise ValueError("art may contain only printable ASCII and line breaks")
+    return art.splitlines()
+
+
+def plan_art(rows, start, end, counts):
+    # Day offsets keep partial weeks aligned with the calendar's Sunday row.
+    start_row = (start.weekday() + 1) % 7
+    last_offset = (end - start).days
+    last_cell = last_offset + start_row
+    width = last_cell // 7 + 1
+    if len(rows) > 7 or any(len(row) > width for row in rows):
+        raise ValueError(f"art must fit the selected {width}-column × 7-row calendar")
+
+    preview = []
+    plan = []
+    for row in range(7):
+        art_row = rows[row] if row < len(rows) else ""
+        cells = []
+        for column, char in enumerate(art_row.ljust(width)):
+            shade = 0 if char == " " else SHADES.get(char, 4)
+            offset = column * 7 + row - start_row
+            if not 0 <= offset <= last_offset:
+                if shade:
+                    raise ValueError(
+                        f"painted cell at row {row + 1}, column {column + 1} "
+                        "falls outside the selected dates"
+                    )
+                cells.append("-")
+                continue
+            cells.append(str(shade) if shade else ".")
+            if shade:
+                plan.append((start + offset * DAY, counts[shade]))
+        preview.append("".join(cells))
+    return preview, sorted(plan)
+
+
+def git_identity(option, key, flag):
+    if option is None:
+        result = subprocess.run(
+            ["git", "config", "--get", key], capture_output=True, text=True, check=False
+        )
+        option = result.stdout.rstrip("\n")
+    if not option.strip() or any(ord(char) < 32 or char in "<>" for char in option):
+        raise ValueError(f"provide a valid {flag} or configure git {key}")
+    return option
+
+
+def repo_environment():
+    # Git variables such as GIT_DIR and GIT_INDEX_FILE can redirect repository writes.
+    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+
+def create_repo(path, plan, name, email):
+    env = repo_environment()
+    # Only create and clean up a directory owned by this invocation.
+    path.mkdir()
+    try:
+        subprocess.run(
+            ["git", "init", "--quiet", "--initial-branch=main", "--template=", "."],
+            cwd=path,
+            env=env,
+            check=True,
+        )
+        with subprocess.Popen(
+            ["git", "fast-import", "--quiet", "--date-format=raw", "--done"],
+            cwd=path,
+            env=env,
+            stdin=subprocess.PIPE,
+        ) as importer:
+            for day, count in plan:
+                # Noon UTC keeps the recorded date independent of the local time zone.
+                seconds = (day - EPOCH).days * 86400 + 43200
+                for index in range(1, count + 1):
+                    message = f"Draw {day} ({index}/{count})"
+                    blob = f"{day} {index}/{count}\n"
+                    importer.stdin.write(
+                        (
+                            "commit refs/heads/main\n"
+                            f"committer {name} <{email}> {seconds} +0000\n"
+                            f"data {len(message)}\n{message}\n"
+                            "M 100644 inline pixel.txt\n"
+                            f"data {len(blob)}\n{blob}\n"
+                        ).encode("utf-8")
+                    )
+            importer.stdin.write(b"done\n")
+            importer.stdin.close()
+            if importer.wait():
+                raise ValueError("git fast-import failed")
+        subprocess.run(
+            ["git", "-c", "core.hooksPath=/dev/null", "reset", "--quiet", "--hard"],
+            cwd=path,
+            env=env,
+            check=True,
+        )
+    except BaseException:
+        shutil.rmtree(path)
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("art", help="ASCII art file, or - for stdin")
+    dates = parser.add_mutually_exclusive_group(required=True)
+    dates.add_argument("--year", type=int, help="calendar year")
+    dates.add_argument("--range", nargs=2, metavar=("START", "END"), help="inclusive dates")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--preview", action="store_true", help="show planned shades and commit count")
+    mode.add_argument("--output", type=Path, help="create a repository in this new directory")
+    parser.add_argument("--counts", type=parse_counts, default="1,4,8,16", metavar="A,B,C,D")
+    parser.add_argument("--name", help="Git author name (defaults to git user.name)")
+    parser.add_argument("--email", help="Git author email (defaults to git user.email)")
+    args = parser.parse_args()
+
+    try:
+        if args.year is not None:
+            start, end = date(args.year, 1, 1), date(args.year, 12, 31)
+        else:
+            start, end = map(parse_date, args.range)
+        if not 0 <= (end - start).days < 366:
+            raise ValueError("the date range must contain 1 to 366 days")
+        if start < EPOCH:
+            raise ValueError("Git commit dates must be on or after 1970-01-01")
+
+        preview, plan = plan_art(read_art(args.art), start, end, args.counts)
+        total = sum(count for _, count in plan)
+        if args.preview:
+            print(f"{start} to {end} · {len(plan)} painted days · {total} commits")
+            print("\n".join(preview))
+        else:
+            if not plan:
+                raise ValueError("the art has no painted days")
+            name = git_identity(args.name, "user.name", "--name")
+            email = git_identity(args.email, "user.email", "--email")
+            create_repo(args.output, plan, name, email)
+            print(f"Created {total} commits across {len(plan)} days in {args.output}")
+    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+        parser.exit(1, f"{parser.prog}: {error}\n")
+
+
+if __name__ == "__main__":
+    main()
