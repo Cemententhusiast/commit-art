@@ -34,8 +34,15 @@ inclusive span of up to 366 days.
 The first column is the week containing the start date. Rows run from Sunday at
 the top to Saturday at the bottom. Each column is one week, so a full calendar
 year usually spans 53 columns. A leap year starting on Saturday spans 54.
-Keep the days before the start and after the end blank in partial weeks. The
-preview marks those cells with `-` and available blank cells with `.`.
+With `--year`, the CLI keeps the original placement when it fits. If a partial
+week would cut off the drawing, it shifts the drawing by the fewest weeks that
+make it fit. For full-width art that needs more room, it compresses the columns
+and keeps the darkest shade when two painted cells overlap. Weekday rows stay
+fixed. Year mode accepts drawings up to 54 columns wide.
+
+With `--range`, placement is exact. Keep the days before the start and after
+the end blank in partial weeks. The preview marks unavailable cells with `-`
+and available blank cells with `.`.
 
 | Input | Commits per day |
 | --- | ---: |

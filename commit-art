@@ -121,14 +121,45 @@ def art_shades(rows, force_ink):
     return {**blanks, " ": 0, **{char: shades[amount] for char, amount in coverage.items()}}
 
 
-def plan_art(rows, start, end, counts, force_ink=False):
+def fit_year(pixels, start_row, last_cell, width):
+    if not pixels:
+        return pixels
+
+    left = min(column for row, column in pixels)
+    right = max(column for row, column in pixels)
+    shifts = sorted(range(-left, width - right), key=abs)
+    for shift in shifts:
+        if all(start_row <= (column + shift) * 7 + row <= last_cell for row, column in pixels):
+            return {(row, column + shift): shade for (row, column), shade in pixels.items()}
+
+    # Only use partial edge weeks when the artwork's edge fits those weekdays.
+    first_week = int(any(column == left and row < start_row for row, column in pixels))
+    last_week = width - 1 - int(
+        any(column == right and (width - 1) * 7 + row > last_cell for row, column in pixels)
+    )
+    fitted = {}
+    for (row, column), shade in pixels.items():
+        target = first_week + round((column - left) * (last_week - first_week) / (right - left))
+        day = target * 7 + row
+        # A neighboring column can round into a partial edge week.
+        if day < start_row:
+            target += 1
+        elif day > last_cell:
+            target -= 1
+        cell = row, target
+        fitted[cell] = max(shade, fitted.get(cell, 0))
+    return fitted
+
+
+def plan_art(rows, start, end, counts, force_ink=False, fit=False):
     # Day offsets keep partial weeks aligned with the calendar's Sunday row.
     start_row = (start.weekday() + 1) % 7
     last_offset = (end - start).days
     last_cell = last_offset + start_row
     width = last_cell // 7 + 1
-    if len(rows) > 7 or any(len(row) > width for row in rows):
-        raise ValueError(f"art must fit the selected {width}-column × 7-row calendar")
+    max_columns = 54 if fit else width
+    if len(rows) > 7 or any(len(row) > max_columns for row in rows):
+        raise ValueError(f"art must fit within {max_columns} columns and 7 rows")
 
     shades = art_shades(rows, force_ink)
     pixels = {
@@ -137,6 +168,8 @@ def plan_art(rows, start, end, counts, force_ink=False):
         for column, char in enumerate(line)
         if shades[char]
     }
+    if fit:
+        pixels = fit_year(pixels, start_row, last_cell, width)
 
     preview = []
     plan = []
@@ -321,7 +354,7 @@ def main():
 
         preview, plan = plan_art(
             read_art(source), start, end, args.counts,
-            force_ink=args.shading == "ink",
+            force_ink=args.shading == "ink", fit=args.year is not None,
         )
         total = sum(count for _, count in plan)
         if args.preview:
