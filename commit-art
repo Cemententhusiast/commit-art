@@ -13,6 +13,9 @@ import sys
 DAY = timedelta(days=1)
 EPOCH = date(1970, 1, 1)
 SHADES = dict(zip("01234.:+*#", (0, 1, 2, 3, 4, 0, 1, 2, 3, 4)))
+MAIN = "refs/heads/main"
+GENERATED = "refs/commit-art/generated"
+BASELINE = "refs/commit-art/baseline"
 
 
 def parse_date(value):
@@ -115,14 +118,23 @@ def create_repo(path, plan, name, email):
                     blob = f"{day} {index}/{count}\n"
                     importer.stdin.write(
                         (
-                            "commit refs/heads/main\n"
+                            f"commit {MAIN}\n"
                             f"committer {name} <{email}> {seconds} +0000\n"
                             f"data {len(message)}\n{message}\n"
                             "M 100644 inline pixel.txt\n"
                             f"data {len(blob)}\n{blob}\n"
                         ).encode("utf-8")
                     )
-            importer.stdin.write(b"done\n")
+            baseline_message = "Empty art repository."
+            importer.stdin.write(
+                (
+                    f"reset {GENERATED}\nfrom {MAIN}\n\n"
+                    f"commit {BASELINE}\n"
+                    "committer commit-art <commit-art@invalid> 0 +0000\n"
+                    f"data {len(baseline_message)}\n{baseline_message}\n\n"
+                    "done\n"
+                ).encode("ascii")
+            )
             importer.stdin.close()
             if importer.wait():
                 raise ValueError("git fast-import failed")
@@ -137,21 +149,78 @@ def create_repo(path, plan, name, email):
         raise
 
 
+def undo_repo(path, push):
+    env = repo_environment()
+
+    def git(*args, capture=True):
+        return subprocess.run(
+            ["git", "-c", "core.hooksPath=/dev/null", *args],
+            cwd=path,
+            env=env,
+            check=True,
+            capture_output=capture,
+            text=True,
+        ).stdout
+
+    try:
+        root = git("rev-parse", "--show-toplevel").strip()
+        generated = git("rev-parse", "--verify", f"{GENERATED}^{{commit}}").strip()
+        baseline = git("rev-parse", "--verify", f"{BASELINE}^{{commit}}").strip()
+    except subprocess.CalledProcessError as error:
+        raise ValueError("undo requires a repository generated with undo support") from error
+
+    if Path(root).resolve() != path.resolve():
+        raise ValueError("pass the root directory of the generated repository")
+    if git("branch", "--show-current").strip() != "main":
+        raise ValueError("check out main before undoing the art")
+    current = git("rev-parse", "HEAD").strip()
+    if current not in (generated, baseline):
+        raise ValueError("main has changed since generation")
+    if git("status", "--porcelain"):
+        raise ValueError("commit or set aside working tree changes before undoing the art")
+
+    if push:
+        git(
+            "push", f"--force-with-lease={MAIN}:{generated}", "origin", f"{baseline}:{MAIN}",
+            capture=False,
+        )
+    if current == generated:
+        git("reset", "--quiet", "--keep", baseline, capture=False)
+    print(f"Art removed from main in {path}" + (" and on origin" if push else ""))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("art", help="ASCII art file, or - for stdin")
-    dates = parser.add_mutually_exclusive_group(required=True)
+    art = parser.add_mutually_exclusive_group()
+    art.add_argument("art", nargs="?", help="ASCII art file, or - for stdin")
+    art.add_argument("-f", "--file", help="ASCII art file, or - for stdin")
+    dates = parser.add_mutually_exclusive_group()
     dates.add_argument("--year", type=int, help="calendar year")
     dates.add_argument("--range", nargs=2, metavar=("START", "END"), help="inclusive dates")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--preview", action="store_true", help="show planned shades and commit count")
     mode.add_argument("--output", type=Path, help="create a repository in this new directory")
+    mode.add_argument("--undo", type=Path, metavar="REPO", help="remove the art from its generated repository")
+    parser.add_argument("--push", action="store_true", help="also undo the art on origin")
     parser.add_argument("--counts", type=parse_counts, default="1,4,8,16", metavar="A,B,C,D")
     parser.add_argument("--name", help="Git author name (defaults to git user.name)")
     parser.add_argument("--email", help="Git author email (defaults to git user.email)")
     args = parser.parse_args()
 
+    source = args.file if args.file is not None else args.art
+    if args.undo is not None:
+        if source is not None or args.year is not None or args.range is not None:
+            parser.error("--undo takes a repository directory without art or dates")
+    else:
+        if args.push:
+            parser.error("--push requires --undo")
+        if source is None or (args.year is None and args.range is None):
+            parser.error("provide an art file and either --year or --range")
+
     try:
+        if args.undo is not None:
+            undo_repo(args.undo, args.push)
+            return
         if args.year is not None:
             start, end = date(args.year, 1, 1), date(args.year, 12, 31)
         else:
@@ -161,7 +230,7 @@ def main():
         if start < EPOCH:
             raise ValueError("Git commit dates must be on or after 1970-01-01")
 
-        preview, plan = plan_art(read_art(args.art), start, end, args.counts)
+        preview, plan = plan_art(read_art(source), start, end, args.counts)
         total = sum(count for _, count in plan)
         if args.preview:
             print(f"{start} to {end} · {len(plan)} painted days · {total} commits")

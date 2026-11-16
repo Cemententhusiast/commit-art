@@ -18,12 +18,13 @@ Save this as `art.txt` to try a shaded diamond.
 ```
 
 ```sh
-./commit-art art.txt --year 2023 --preview
-./commit-art art.txt --year 2023 --output ./my-art --email 'YOUR_GITHUB_EMAIL'
+./commit-art --file art.txt --year 2023 --preview
+./commit-art --file art.txt --year 2023 --output ./my-art --email 'YOUR_GITHUB_EMAIL'
 ```
 
-Use `--range START END` for an inclusive span of up to 366 days. Use `-` as
-the art filename to read from stdin.
+Pass the art file with `--file` (`-f`) or as the first positional argument.
+Use `-` as the filename to read from stdin. Use `--range START END` for an
+inclusive span of up to 366 days.
 
 ```sh
 ./commit-art art.txt --range 2024-01-07 2024-02-24 --preview
@@ -69,3 +70,20 @@ git -C ./my-art push -u origin main
 
 On your GitHub profile, select the year you drew in to see the result. A span
 crossing December and January can appear across two year views.
+
+## Undo the art
+
+```sh
+./commit-art --undo ./my-art
+./commit-art --undo ./my-art --push  # Also update origin/main if you published the art
+```
+
+Undo replaces the generated commits on `main` with a single empty commit. The
+repository stays in place and keeps a local reference to the generated history.
+Undo requires a clean working tree on `main` and refuses to replace later local
+commits. With `--push`, the remote update uses the original generated tip as a
+lease, so it also refuses to replace later commits on `origin/main`. GitHub
+branch protection can block this update.
+
+Repositories created before undo support lack the saved references this command
+uses.
