@@ -54,7 +54,8 @@ including blank ones.
 
 The output directory must be new. It receives a standalone repository with one
 commit per contribution on `main`. The CLI assigns both Git timestamps to noon
-UTC on each selected day. It reads the identity from Git configuration in the
+in your system's local time zone, using the UTC offset in effect on each selected
+day. It reads the identity from Git configuration in the
 directory you run it from. Override it with `--name` and `--email` as needed.
 
 Create an empty public GitHub repository under your account and push the generated

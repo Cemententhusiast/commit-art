@@ -2,7 +2,7 @@
 """Turn ASCII art into dated Git commits."""
 
 import argparse
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 import os
 from pathlib import Path
 import shutil
@@ -111,15 +111,19 @@ def create_repo(path, plan, name, email):
             stdin=subprocess.PIPE,
         ) as importer:
             for day, count in plan:
-                # Noon UTC keeps the recorded date independent of the local time zone.
-                seconds = (day - EPOCH).days * 86400 + 43200
+                timestamp = datetime.combine(day, time(12)).astimezone()
+                seconds = int(timestamp.timestamp())
+                if seconds < 0:
+                    raise ValueError(f"local noon on {day} is before the Git timestamp epoch")
+                # Git stores time zone offsets to the minute.
+                offset = timestamp.strftime("%z")[:5]
                 for index in range(1, count + 1):
                     message = f"Draw {day} ({index}/{count})"
                     blob = f"{day} {index}/{count}\n"
                     importer.stdin.write(
                         (
                             f"commit {MAIN}\n"
-                            f"committer {name} <{email}> {seconds} +0000\n"
+                            f"committer {name} <{email}> {seconds} {offset}\n"
                             f"data {len(message)}\n{message}\n"
                             "M 100644 inline pixel.txt\n"
                             f"data {len(blob)}\n{blob}\n"
