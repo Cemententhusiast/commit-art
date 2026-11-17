@@ -70,6 +70,16 @@ the calendar, and existing contributions can change the appearance of any cell,
 including blank ones.
 [GitHub contribution calendar fields](https://docs.github.com/en/graphql/reference/users#contributioncalendarday)
 
+## Wave preset
+
+The 2022 Wave preset drew this pattern on GitHub with 820 commits.
+
+![Two green waves across the 2022 GitHub contribution calendar](examples/full-year-wave-2022.png)
+
+```sh
+./commit-art --file examples/full-year-wave-2022.txt --year 2022 --preview
+```
+
 ## Publish to GitHub
 
 The output directory must be new. It receives a standalone repository with one
